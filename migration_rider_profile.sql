@@ -1,4 +1,4 @@
-USE Zaride;
+
 
 ALTER TABLE riders
     ADD COLUMN whatsapp VARCHAR(25) NULL AFTER status,

@@ -1,0 +1,12 @@
+RewriteEngine On
+
+# Redirect /folder/page.php to /folder/page using the public URL, not the disk path.
+# Skip POST so the form body is not discarded.
+RewriteCond %{REQUEST_METHOD} !POST
+RewriteCond %{THE_REQUEST} \s/+(.+?)\.php(?:[\s?]|$) [NC]
+RewriteRule ^ /%1 [R=302,L,NE]
+
+# Serve extensionless URLs from the matching PHP file in this folder.
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteCond %{REQUEST_FILENAME}.php -f
+RewriteRule ^(.+?)/?$ $1.php [L]

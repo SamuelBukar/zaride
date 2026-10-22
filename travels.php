@@ -12,13 +12,15 @@ $minSeats = (int) ($_GET['seats'] ?? 1);
 // Build SQL query for travel trips
 $sql = "SELECT t.*, r.full_name as rider_name, r.phone as rider_phone, r.whatsapp as rider_whatsapp,
                r.rating_avg, r.rating_count, r.trips_completed, r.vehicle_type, r.vehicle_model,
-               r.vehicle_color, r.plate_number, r.status as rider_status
+               r.vehicle_color, r.plate_number, r.status as rider_status, r.verification_status
         FROM trips t
         JOIN riders r ON t.rider_id = r.id
         WHERE t.service_type IN ('travel', 'both')
           AND t.status = 'active'
           AND t.available_seats >= ?
-          AND t.departure_time >= DATE_SUB(NOW(), INTERVAL 2 HOUR)";
+          AND t.departure_time >= DATE_SUB(NOW(), INTERVAL 2 HOUR)
+          AND r.account_status = 'active' AND r.deleted_at IS NULL
+          AND r.verification_status = 'approved'";
 
 $params = [$minSeats];
 
@@ -66,7 +68,7 @@ $flash = getFlash();
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>ZaRide | Find Passenger Travels & Carpools</title>
-    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="styles.css?v=<?= (int) @filemtime(__DIR__ . '/styles.css') ?>">
 </head>
 <body>
     <header class="site-header">
@@ -78,6 +80,7 @@ $flash = getFlash();
             </div>
         </a>
         <nav class="site-nav">
+            <a class="nav-link" href="nearby.php">📍 Nearby</a>
             <a class="nav-link active" href="travels.php">🚗 Find Travels</a>
             <a class="nav-link" href="deliveries.php">📦 Deliveries</a>
             <a class="nav-link" href="zaride.php">👥 Riders</a>
@@ -89,7 +92,7 @@ $flash = getFlash();
                 </a>
             <?php else: ?>
                 <a class="nav-link" href="login.php">Sign In</a>
-                <a class="button button-sm button-primary" href="index.php#register">Join ZaRide</a>
+                <a class="button button-sm button-primary" href="register.php">Join ZaRide</a>
             <?php endif; ?>
         </nav>
     </header>
@@ -102,9 +105,12 @@ $flash = getFlash();
                 <h1 style="font-size: clamp(28px, 4vw, 42px); font-weight: 800; margin-bottom: 12px; letter-spacing: -1px;">
                     Find Rides & Share Travels
                 </h1>
-                <p style="color: #d1fae5; max-width: 650px; font-size: 16px; margin-bottom: 0;">
+                <p style="color: #d1fae5; max-width: 650px; font-size: 16px; margin-bottom: 16px;">
                     Book seats directly with verified drivers heading your way. Enjoy lower fares, direct communication, and zero middleman markups.
                 </p>
+                <a class="button button-sm" href="nearby.php" style="background: #ecfdf5; color: #065f46;">
+                    Going a short distance nearby? Get live rider alerts →
+                </a>
             </div>
         </section>
 
@@ -116,8 +122,8 @@ $flash = getFlash();
             <!-- Filter Console -->
             <form method="get" action="travels.php" class="filter-bar">
                 <div class="filter-group" style="flex: 1;">
-                    <input class="console-field" style="height: 40px; min-width: 170px;" type="text" name="origin" placeholder="From (e.g. Lagos, Ikeja)" value="<?= e($origin) ?>">
-                    <input class="console-field" style="height: 40px; min-width: 170px;" type="text" name="destination" placeholder="To (e.g. Victoria Island, Ibadan)" value="<?= e($destination) ?>">
+                    <input class="console-field" style="height: 40px; min-width: 170px;" type="text" name="origin" placeholder="From (e.g. Tudun Wada, Zaria)" value="<?= e($origin) ?>">
+                    <input class="console-field" style="height: 40px; min-width: 170px;" type="text" name="destination" placeholder="To (e.g. Kongo Campus, Zaria)" value="<?= e($destination) ?>">
                     <input class="console-field" style="height: 40px; width: 140px;" type="date" name="date" value="<?= e($date) ?>">
                     <select class="filter-select" name="vehicle">
                         <option value="">Vehicle: All</option>
@@ -165,7 +171,7 @@ $flash = getFlash();
                                             <?php endif; ?>
                                         </div>
                                         <div>
-                                            <div class="rider-meta-name"><?= e($trip['rider_name']) ?></div>
+                                            <div class="rider-meta-name"><?= e($trip['rider_name']) ?> <?= renderVerifiedTag($trip) ?></div>
                                             <div class="rider-submeta">
                                                 <?= renderRatingStars((float) $trip['rating_avg'], (int) $trip['rating_count']) ?>
                                                 <span>· <?= (int) $trip['trips_completed'] ?> trips</span>
@@ -219,11 +225,6 @@ $flash = getFlash();
                                     <a class="button button-primary button-full" href="book.php?trip_id=<?= (int) $trip['id'] ?>&type=travel">
                                         Book Seat →
                                     </a>
-                                    <?php if (!empty($trip['rider_whatsapp'])): ?>
-                                        <a class="button button-whatsapp" href="https://wa.me/<?= e(preg_replace('/\D+/', '', $trip['rider_whatsapp'])) ?>?text=<?= rawurlencode("Hi {$trip['rider_name']}, I saw your ZaRide trip from {$trip['origin_address']} to {$trip['destination_address']}.") ?>" target="_blank" rel="noopener noreferrer" title="Chat on WhatsApp">
-                                            WhatsApp
-                                        </a>
-                                    <?php endif; ?>
                                 </div>
                             </div>
                         </article>
@@ -247,11 +248,11 @@ $flash = getFlash();
                     <div class="form-grid-2">
                         <div class="form-group">
                             <label class="form-label" for="req-origin">Your Pickup Location</label>
-                            <input class="form-control" id="req-origin" name="origin" placeholder="e.g. Surulere, Lagos" required>
+                            <input class="form-control" id="req-origin" name="origin" placeholder="e.g. Sabon Gari, Zaria" required>
                         </div>
                         <div class="form-group">
                             <label class="form-label" for="req-destination">Your Destination</label>
-                            <input class="form-control" id="req-destination" name="destination" placeholder="e.g. Lekki Phase 1, Lagos" required>
+                            <input class="form-control" id="req-destination" name="destination" placeholder="e.g. ABU Samaru, Zaria" required>
                         </div>
                     </div>
 
@@ -262,12 +263,7 @@ $flash = getFlash();
                         </div>
                         <div class="form-group">
                             <label class="form-label" for="req-passengers">Passengers</label>
-                            <select class="form-control" id="req-passengers" name="passengers_count">
-                                <option value="1">1 Passenger</option>
-                                <option value="2">2 Passengers</option>
-                                <option value="3">3 Passengers</option>
-                                <option value="4">4+ Passengers</option>
-                            </select>
+                            <input class="form-control" id="req-passengers" name="passengers_count" type="number" min="1" max="15" step="1" value="1" required>
                         </div>
                     </div>
 

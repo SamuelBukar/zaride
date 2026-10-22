@@ -14,7 +14,7 @@ if ($bookingId <= 0) {
 
 // Fetch booking
 $bStmt = db()->prepare(
-    "SELECT b.*, r.full_name as rider_name, r.id as rider_id
+    "SELECT b.*, r.full_name as rider_name, r.id as rider_id, r.verification_status
      FROM bookings b
      JOIN riders r ON b.rider_id = r.id
      WHERE b.id = ? AND b.customer_id = ?"
@@ -108,7 +108,7 @@ $flash = getFlash();
             <div style="text-align: center; margin-bottom: 24px;">
                 <span class="hero-eyebrow" style="background: var(--primary-subtle); color: var(--primary);">Trip Completed</span>
                 <h1 style="font-size: 24px; font-weight: 800; margin-bottom: 6px;">How was your journey?</h1>
-                <p style="color: var(--muted); font-size: 14px;">Leave peer feedback for <strong><?= e($booking['rider_name']) ?></strong></p>
+                <p style="color: var(--muted); font-size: 14px;">Leave peer feedback for <strong><?= e($booking['rider_name']) ?></strong> <?= renderVerifiedTag($booking) ?></p>
             </div>
 
             <div style="background: var(--surface-alt); border-radius: var(--radius-md); padding: 14px; margin-bottom: 22px; font-size: 13px; color: var(--muted);">

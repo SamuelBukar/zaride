@@ -2,7 +2,16 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/config.php';
-$riderId = requireAccount('rider');
+$staff = currentStaff();
+if ($staff !== null) {
+    $riderId = (int) ($_GET['rider_id'] ?? 0);
+    if ($riderId <= 0) {
+        http_response_code(404);
+        exit('File not found.');
+    }
+} else {
+    $riderId = requireAccount('rider');
+}
 $field = $_GET['file'] ?? '';
 $column = $field === 'vehicle' ? 'vehicle_photo_path' : ($field === 'plate' ? 'plate_photo_path' : '');
 

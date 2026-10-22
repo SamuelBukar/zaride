@@ -10,12 +10,14 @@ $vehicle = trim($_GET['vehicle'] ?? '');
 // 1. Fetch active delivery routes posted by riders
 $sqlTrips = "SELECT t.*, r.full_name as rider_name, r.phone as rider_phone, r.whatsapp as rider_whatsapp,
                     r.rating_avg, r.rating_count, r.trips_completed, r.vehicle_type, r.vehicle_model,
-                    r.plate_number, r.status as rider_status
+                    r.plate_number, r.status as rider_status, r.verification_status
              FROM trips t
              JOIN riders r ON t.rider_id = r.id
              WHERE t.service_type IN ('delivery', 'both')
                AND t.status = 'active'
-               AND t.departure_time >= DATE_SUB(NOW(), INTERVAL 2 HOUR)";
+               AND t.departure_time >= DATE_SUB(NOW(), INTERVAL 2 HOUR)
+               AND r.account_status = 'active' AND r.deleted_at IS NULL
+               AND r.verification_status = 'approved'";
 
 $paramsTrips = [];
 if ($origin !== '') {
@@ -46,11 +48,13 @@ try {
 // 2. Fetch open delivery requests posted by customers
 $openRequests = [];
 try {
+    $liveSearch = nearbySearchLiveSql('req');
     $reqStmt = db()->query(
         "SELECT req.*, c.full_name as customer_name, c.phone as customer_phone
          FROM requests req
          JOIN customers c ON req.customer_id = c.id
          WHERE req.request_type = 'delivery' AND req.status = 'open'
+           AND {$liveSearch}
          ORDER BY req.created_at DESC LIMIT 30"
     );
     $openRequests = $reqStmt->fetchAll();
@@ -60,6 +64,23 @@ try {
 
 $currentAcc = currentAccount();
 $flash = getFlash();
+$openDelivery = null;
+if ($currentAcc && ($currentAcc['account_type'] ?? '') === 'customer') {
+    try {
+        $ownStmt = db()->prepare(
+            "SELECT *,
+                    UNIX_TIMESTAMP(COALESCE(search_started_at, created_at)) AS search_started_unix,
+                    UNIX_TIMESTAMP(NOW()) AS server_unix
+             FROM requests
+             WHERE customer_id = ? AND request_type = 'delivery' AND status = 'open'
+             ORDER BY id DESC LIMIT 1"
+        );
+        $ownStmt->execute([(int) $currentAcc['id']]);
+        $openDelivery = $ownStmt->fetch() ?: null;
+    } catch (PDOException $e) {
+        error_log('Open delivery lookup failed: ' . $e->getMessage());
+    }
+}
 ?>
 <!doctype html>
 <html lang="en">
@@ -90,7 +111,7 @@ $flash = getFlash();
                 </a>
             <?php else: ?>
                 <a class="nav-link" href="login.php">Sign In</a>
-                <a class="button button-sm button-primary" href="index.php#register">Join ZaRide</a>
+                <a class="button button-sm button-primary" href="register.php">Join ZaRide</a>
             <?php endif; ?>
         </nav>
     </header>
@@ -117,8 +138,8 @@ $flash = getFlash();
             <!-- Filter Console -->
             <form method="get" action="deliveries.php" class="filter-bar">
                 <div class="filter-group" style="flex: 1;">
-                    <input class="console-field" style="height: 40px; min-width: 180px;" type="text" name="origin" placeholder="Pickup (e.g. Ikeja, Alausa)" value="<?= e($origin) ?>">
-                    <input class="console-field" style="height: 40px; min-width: 180px;" type="text" name="destination" placeholder="Drop-off (e.g. Lekki, VI)" value="<?= e($destination) ?>">
+                    <input class="console-field" style="height: 40px; min-width: 180px;" type="text" name="origin" placeholder="Pickup (e.g. Sabon Gari, Zaria)" value="<?= e($origin) ?>">
+                    <input class="console-field" style="height: 40px; min-width: 180px;" type="text" name="destination" placeholder="Drop-off (e.g. Samaru, Zaria)" value="<?= e($destination) ?>">
                     <select class="filter-select" name="vehicle">
                         <option value="">Vehicle: Any</option>
                         <option value="motorcycle" <?= $vehicle === 'motorcycle' ? 'selected' : '' ?>>🏍️ Motorcycle (Express Dispatch)</option>
@@ -165,7 +186,7 @@ $flash = getFlash();
                                                 <?php endif; ?>
                                             </div>
                                             <div>
-                                                <div class="rider-meta-name"><?= e($trip['rider_name']) ?></div>
+                                                <div class="rider-meta-name"><?= e($trip['rider_name']) ?> <?= renderVerifiedTag($trip) ?></div>
                                                 <div class="rider-submeta">
                                                     <?= renderRatingStars((float) $trip['rating_avg'], (int) $trip['rating_count']) ?>
                                                     <span>· <?= (int) $trip['trips_completed'] ?> deliveries</span>
@@ -217,11 +238,6 @@ $flash = getFlash();
                                         <a class="button button-primary button-full" href="book.php?trip_id=<?= (int) $trip['id'] ?>&type=delivery">
                                             Send Parcel with this Rider →
                                         </a>
-                                        <?php if (!empty($trip['rider_whatsapp'])): ?>
-                                            <a class="button button-whatsapp" href="https://wa.me/<?= e(preg_replace('/\D+/', '', $trip['rider_whatsapp'])) ?>?text=<?= rawurlencode("Hi {$trip['rider_name']}, I need a parcel delivered from {$trip['origin_address']} to {$trip['destination_address']} via ZaRide.") ?>" target="_blank" rel="noopener noreferrer">
-                                                WhatsApp
-                                            </a>
-                                        <?php endif; ?>
                                     </div>
                                 </div>
                             </article>
@@ -247,9 +263,9 @@ $flash = getFlash();
                         <p style="margin: 0; color: var(--muted);">All customer packages have been accepted! Check back soon or post a new package below.</p>
                     </div>
                 <?php else: ?>
-                    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px;">
+                    <div class="request-grid">
                         <?php foreach ($openRequests as $req): ?>
-                            <div style="background: white; border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 20px; box-shadow: var(--shadow-sm); display: flex; flex-direction: column; justify-content: space-between;">
+                            <div class="request-card">
                                 <div>
                                     <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
                                         <span class="status-badge badge-amber"><span class="badge-dot"></span>Open Package</span>
@@ -303,6 +319,12 @@ $flash = getFlash();
                     <p style="color: var(--muted); font-size: 15px;">Fill in your package and location details. Online riders and travelers on your route will be alerted to claim your delivery.</p>
                 </div>
 
+                <?php if ($openDelivery): ?>
+                    <div style="max-width: 720px; margin: 0 auto;">
+                        <?= renderLiveSearchBox($openDelivery, 'delivery') ?>
+                        <?= renderLiveSearchScript() ?>
+                    </div>
+                <?php else: ?>
                 <form method="post" action="book.php" style="max-width: 720px; margin: 0 auto;">
                     <input type="hidden" name="csrf_token" value="<?= e(csrfToken()) ?>">
                     <input type="hidden" name="action" value="post_request">
@@ -311,11 +333,11 @@ $flash = getFlash();
                     <div class="form-grid-2">
                         <div class="form-group">
                             <label class="form-label" for="del-origin">Pickup Location & Landmark</label>
-                            <input class="form-control" id="del-origin" name="origin" placeholder="e.g. 14 Allen Avenue, Ikeja" required>
+                            <input class="form-control" id="del-origin" name="origin" placeholder="e.g. 14 Sokoto Road, Sabon Gari, Zaria" required>
                         </div>
                         <div class="form-group">
                             <label class="form-label" for="del-destination">Drop-off Destination</label>
-                            <input class="form-control" id="del-destination" name="destination" placeholder="e.g. 25 Admiralty Way, Lekki Phase 1" required>
+                            <input class="form-control" id="del-destination" name="destination" placeholder="e.g. 25 Kofar Doka Road, Zaria City" required>
                         </div>
                     </div>
 
@@ -366,6 +388,7 @@ $flash = getFlash();
                         <?php endif; ?>
                     </div>
                 </form>
+                <?php endif; ?>
             </section>
         </div>
     </main>

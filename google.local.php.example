@@ -1,0 +1,13 @@
+<?php
+/**
+ * Copy this file to google.local.php and paste the OAuth client from
+ * Google Cloud Console → APIs & Services → Credentials → OAuth client ID (Web).
+ *
+ * Authorized JavaScript origin: http://localhost
+ * Authorized redirect URI:      http://localhost/Zaride/google-callback
+ */
+return [
+    'client_id' => '',
+    'client_secret' => '',
+    'base_url' => 'http://localhost/Zaride',
+];

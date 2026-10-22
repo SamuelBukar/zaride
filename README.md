@@ -18,12 +18,18 @@ ZaRide is a modern Peer-to-Peer (P2P) platform designed for riders, drivers, pas
 - **Open Parcel Marketplace:** Senders post packages with recipient details and offered budget. Nearby riders can claim and deliver them with 1 click.
 - **Delivery routes by Riders:** Drivers specify cargo space dimensions and delivery fees alongside passenger seating.
 
-### 3. 💬 Real-Time In-App P2P Chat
+### 3. 📍 Nearby Short Rides (Live Alerts)
+- Customers request a **local trip** (up to 12 km) instead of scheduled intercity travel.
+- The app shares live GPS (with permission) and matches **online riders within about 5 km**.
+- Both sides get real-time in-app alerts (bell + toast) when a nearby match appears or a rider accepts.
+- Longer journeys still use **Travels** — Nearby is only for short, same-area hops.
+
+### 4. 💬 Real-Time In-App P2P Chat
 - Every booking generates a direct, dedicated chat room between the passenger/sender and the driver.
 - Real-time communication for pickup landmark coordination, arrival updates, and handover confirmation.
-- Direct phone call and WhatsApp integration shortcuts.
+- Direct phone call shortcuts. Coordination stays in the in-app chat.
 
-### 4. 🛡️ Trust, Ratings & Safety
+### 5. 🛡️ Trust, Ratings & Safety
 - **Verified Driver Profiles:** Displays vehicle make/model, color, verified license plate number, and photos.
 - **Mutual Reputation:** Customers leave 1-to-5 star ratings and reviews upon journey completion.
 - **Online/Offline Availability Beacon:** Live status indicators so customers know which riders are actively taking trips.
@@ -46,6 +52,7 @@ ZaRide is a modern Peer-to-Peer (P2P) platform designed for riders, drivers, pas
    ```sh
    mysql -u root zaride < migration_v2_p2p.sql
    ```
+   Nearby live-alert columns also apply automatically on first page load. Optional: `mysql -u root Zaride < migration_nearby.sql`
 3. Configuration settings (via environment variables if needed):
    - `ZARIDE_DB_HOST` (default: `127.0.0.1`)
    - `ZARIDE_DB_NAME` (default: `Zaride`)
@@ -72,6 +79,7 @@ All seeded demo accounts use password: `password123`
 ## 📁 File Structure
 
 - `index.php` — Flagship landing page with multi-mode P2P search console, live routes, and registration.
+- `nearby.php` / `nearby-api.php` — Short-distance nearby matching and live notification polling.
 - `travels.php` — Dedicated passenger carpooling & travel search and booking page.
 - `deliveries.php` — Dedicated parcel delivery dispatch, route listings, and open customer request feed.
 - `zaride.php` — Peer rider directory with online beacons, vehicle specifications, and ratings.

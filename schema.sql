@@ -1,8 +1,3 @@
-CREATE DATABASE IF NOT EXISTS Zaride
-    CHARACTER SET utf8mb4
-    COLLATE utf8mb4_unicode_ci;
-
-USE Zaride;
 
 CREATE TABLE IF NOT EXISTS customers (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -10,14 +5,22 @@ CREATE TABLE IF NOT EXISTS customers (
     email VARCHAR(254) NOT NULL,
     phone VARCHAR(25) NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
+    google_sub VARCHAR(255) NULL,
     city VARCHAR(100) NOT NULL DEFAULT 'Lagos',
     avatar_color VARCHAR(20) NOT NULL DEFAULT '#059669',
     avatar_path VARCHAR(255) NULL,
     status ENUM('online', 'offline') NOT NULL DEFAULT 'offline',
+    account_status ENUM('active', 'suspended', 'deleted') NOT NULL DEFAULT 'active',
+    suspension_reason VARCHAR(255) NULL,
+    deleted_at DATETIME NULL,
+    last_lat DECIMAL(10,7) NULL,
+    last_lng DECIMAL(10,7) NULL,
+    last_location_at DATETIME NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
     UNIQUE KEY uq_customers_email (email),
-    UNIQUE KEY uq_customers_phone (phone)
+    UNIQUE KEY uq_customers_phone (phone),
+    UNIQUE KEY uq_customers_google_sub (google_sub)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS riders (
@@ -26,7 +29,15 @@ CREATE TABLE IF NOT EXISTS riders (
     email VARCHAR(254) NOT NULL,
     phone VARCHAR(25) NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
+    google_sub VARCHAR(255) NULL,
     status ENUM('online', 'offline') NOT NULL DEFAULT 'offline',
+    account_status ENUM('active', 'suspended', 'deleted') NOT NULL DEFAULT 'active',
+    suspension_reason VARCHAR(255) NULL,
+    verification_status ENUM('unsubmitted', 'pending', 'approved', 'rejected') NOT NULL DEFAULT 'unsubmitted',
+    verification_note VARCHAR(400) NULL,
+    verified_at DATETIME NULL,
+    verified_by BIGINT UNSIGNED NULL,
+    deleted_at DATETIME NULL,
     whatsapp VARCHAR(25) NULL,
     city VARCHAR(100) NOT NULL DEFAULT 'Lagos',
     bio TEXT NULL,
@@ -43,10 +54,14 @@ CREATE TABLE IF NOT EXISTS riders (
     rating_avg DECIMAL(3,2) NOT NULL DEFAULT 5.00,
     rating_count INT UNSIGNED NOT NULL DEFAULT 0,
     trips_completed INT UNSIGNED NOT NULL DEFAULT 0,
+    last_lat DECIMAL(10,7) NULL,
+    last_lng DECIMAL(10,7) NULL,
+    last_location_at DATETIME NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
     UNIQUE KEY uq_riders_email (email),
     UNIQUE KEY uq_riders_phone (phone),
+    UNIQUE KEY uq_riders_google_sub (google_sub),
     KEY idx_riders_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -87,6 +102,13 @@ CREATE TABLE IF NOT EXISTS requests (
     recipient_phone VARCHAR(25) NULL,
     budget_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
     status ENUM('open', 'accepted', 'in_transit', 'completed', 'cancelled') NOT NULL DEFAULT 'open',
+    trip_mode ENUM('scheduled', 'nearby') NOT NULL DEFAULT 'scheduled',
+    origin_lat DECIMAL(10,7) NULL,
+    origin_lng DECIMAL(10,7) NULL,
+    dest_lat DECIMAL(10,7) NULL,
+    dest_lng DECIMAL(10,7) NULL,
+    estimated_distance_km DECIMAL(6,2) NULL,
+    search_started_at DATETIME NULL,
     assigned_rider_id BIGINT UNSIGNED NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
@@ -109,6 +131,8 @@ CREATE TABLE IF NOT EXISTS bookings (
     fare_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
     status ENUM('pending', 'confirmed', 'in_transit', 'completed', 'declined', 'cancelled') NOT NULL DEFAULT 'pending',
     customer_notes TEXT NULL,
+    customer_chat_at DATETIME NULL,
+    rider_chat_at DATETIME NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
@@ -127,7 +151,7 @@ CREATE TABLE IF NOT EXISTS messages (
     is_read TINYINT(1) NOT NULL DEFAULT 0,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
-    KEY idx_messages_booking (booking_id),
+    KEY idx_messages_booking (booking_id, id),
     CONSTRAINT fk_messages_booking FOREIGN KEY (booking_id) REFERENCES bookings (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -145,4 +169,86 @@ CREATE TABLE IF NOT EXISTS reviews (
     CONSTRAINT fk_reviews_booking FOREIGN KEY (booking_id) REFERENCES bookings (id) ON DELETE CASCADE,
     CONSTRAINT fk_reviews_customer FOREIGN KEY (customer_id) REFERENCES customers (id) ON DELETE CASCADE,
     CONSTRAINT fk_reviews_rider FOREIGN KEY (rider_id) REFERENCES riders (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS notifications (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    recipient_type ENUM('customer', 'rider') NOT NULL,
+    recipient_id BIGINT UNSIGNED NOT NULL,
+    notification_type VARCHAR(40) NOT NULL,
+    title VARCHAR(160) NOT NULL,
+    body VARCHAR(400) NOT NULL,
+    url VARCHAR(255) NULL,
+    related_type VARCHAR(40) NULL,
+    related_id BIGINT UNSIGNED NULL,
+    is_read TINYINT(1) NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_notifications_recipient (recipient_type, recipient_id, is_read, created_at),
+    KEY idx_notifications_related (notification_type, related_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS password_resets (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    account_type ENUM('customer', 'rider') NOT NULL,
+    account_id BIGINT UNSIGNED NOT NULL,
+    token_hash CHAR(64) NOT NULL,
+    expires_at DATETIME NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_password_resets_token (token_hash),
+    KEY idx_password_resets_account (account_type, account_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS staff (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    full_name VARCHAR(120) NOT NULL,
+    email VARCHAR(254) NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    role ENUM('super_admin', 'admin') NOT NULL,
+    status ENUM('active', 'suspended') NOT NULL DEFAULT 'active',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_staff_email (email)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS deletion_requests (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    account_type ENUM('customer', 'rider') NOT NULL,
+    account_id BIGINT UNSIGNED NOT NULL,
+    reason VARCHAR(400) NULL,
+    status ENUM('pending', 'approved', 'rejected', 'cancelled') NOT NULL DEFAULT 'pending',
+    review_note VARCHAR(400) NULL,
+    reviewed_by BIGINT UNSIGNED NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at DATETIME NULL,
+    PRIMARY KEY (id),
+    KEY idx_deletion_status (status, created_at),
+    KEY idx_deletion_account (account_type, account_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS admin_trip_history (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    booking_id BIGINT UNSIGNED NOT NULL,
+    rider_id BIGINT UNSIGNED NOT NULL,
+    customer_id BIGINT UNSIGNED NOT NULL,
+    driver_name VARCHAR(120) NOT NULL,
+    driver_phone VARCHAR(25) NULL,
+    passenger_name VARCHAR(120) NOT NULL,
+    passenger_phone VARCHAR(25) NULL,
+    vehicle_label VARCHAR(160) NULL,
+    plate_number VARCHAR(40) NULL,
+    booking_type ENUM('travel', 'delivery') NOT NULL DEFAULT 'travel',
+    seats_booked INT UNSIGNED NOT NULL DEFAULT 1,
+    package_desc VARCHAR(255) NULL,
+    pickup_location VARCHAR(255) NOT NULL,
+    dropoff_location VARCHAR(255) NOT NULL,
+    scheduled_at DATETIME NOT NULL,
+    fare_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+    status ENUM('confirmed', 'in_transit', 'completed', 'cancelled') NOT NULL,
+    confirmed_at DATETIME NOT NULL,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_admin_trip_booking (booking_id),
+    KEY idx_admin_trip_rider (rider_id, confirmed_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

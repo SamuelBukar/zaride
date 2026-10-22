@@ -17,12 +17,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Action 1: Post open customer request
     if ($action === 'post_request') {
         $customerId = requireAccount('customer');
+        $customerAccount = currentAccount();
+        if (is_array($customerAccount) && suspensionMessage($customerAccount) !== null) {
+            setFlash('error', suspensionMessage($customerAccount));
+            header('Location: dashboard.php?type=customer');
+            exit;
+        }
         $reqType = $_POST['request_type'] ?? 'travel';
         $origin = trim($_POST['origin'] ?? '');
         $destination = trim($_POST['destination'] ?? '');
         $preferredTime = trim($_POST['preferred_time'] ?? '');
         $budget = (float) ($_POST['budget_amount'] ?? 0);
         $passengers = (int) ($_POST['passengers_count'] ?? 1);
+        if ($reqType === 'travel' && ($passengers < 1 || $passengers > 15)) {
+            setFlash('error', 'Enter a passenger count from 1 to 15.');
+            header('Location: travels.php#post-request');
+            exit;
+        }
+        $passengers = max(1, $passengers);
         $packageDetails = trim($_POST['package_details'] ?? '');
         $weightCategory = $_POST['package_weight_category'] ?? null;
         $recipientName = trim($_POST['recipient_name'] ?? '');
@@ -35,11 +47,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         try {
+            if ($reqType === 'delivery') {
+                $previous = db()->prepare(
+                    "SELECT id FROM requests
+                     WHERE customer_id = ? AND request_type = 'delivery' AND status = 'open'"
+                );
+                $previous->execute([$customerId]);
+                foreach ($previous->fetchAll(PDO::FETCH_COLUMN) as $oldId) {
+                    deleteTimedSearchRequest((int) $oldId);
+                }
+            }
+
             $stmt = db()->prepare(
-                "INSERT INTO requests (customer_id, request_type, origin, destination, preferred_time,
-                                        passengers_count, package_details, package_weight_category,
-                                        recipient_name, recipient_phone, budget_amount, status)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')"
+                $reqType === 'delivery'
+                    ? "INSERT INTO requests (customer_id, request_type, origin, destination, preferred_time,
+                                              passengers_count, package_details, package_weight_category,
+                                              recipient_name, recipient_phone, budget_amount, status, search_started_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', NOW())"
+                    : "INSERT INTO requests (customer_id, request_type, origin, destination, preferred_time,
+                                              passengers_count, package_details, package_weight_category,
+                                              recipient_name, recipient_phone, budget_amount, status)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')"
             );
             $stmt->execute([
                 $customerId,
@@ -55,6 +83,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $budget
             ]);
 
+            if ($reqType === 'delivery') {
+                $requestId = (int) db()->lastInsertId();
+                $posted = db()->prepare("SELECT * FROM requests WHERE id = ?");
+                $posted->execute([$requestId]);
+                $postedRequest = $posted->fetch();
+                if ($postedRequest) {
+                    $notified = notifyRidersAboutDelivery($postedRequest);
+                    notifyCustomerAboutDeliverySearch($customerId, $postedRequest, $notified);
+                }
+                setFlash('success', 'Your parcel is posted. We will search for a rider for the next 5 minutes.');
+                header('Location: deliveries.php#send-package');
+                exit;
+            }
+
             setFlash('success', 'Your request has been published! Online riders will be alerted and can accept it.');
             header('Location: dashboard.php?type=customer');
             exit;
@@ -69,6 +111,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Action 2: Confirm trip booking
     if ($action === 'confirm_booking') {
         $customerId = requireAccount('customer');
+        $customerAccount = currentAccount();
+        if (is_array($customerAccount) && suspensionMessage($customerAccount) !== null) {
+            setFlash('error', suspensionMessage($customerAccount));
+            header('Location: dashboard.php?type=customer');
+            exit;
+        }
         $tripId = (int) ($_POST['trip_id'] ?? 0);
         $riderId = (int) ($_POST['rider_id'] ?? 0);
         $bookingType = $_POST['booking_type'] ?? 'travel';
@@ -93,7 +141,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         $riderTargetId = $trip ? (int) $trip['rider_id'] : $riderId;
+        $bookedRider = fetchRiderById($riderTargetId);
+        if ($bookedRider === null || riderWorkBlock($bookedRider) !== null || ($bookingType === 'travel' && ($bookedRider['verification_status'] ?? '') !== 'approved')) {
+            setFlash('error', 'This rider is not available for that booking.');
+            header('Location: ' . ($bookingType === 'delivery' ? 'deliveries.php' : 'travels.php'));
+            exit;
+        }
         $scheduledAt = $trip ? $trip['departure_time'] : date('Y-m-d H:i:s', strtotime('+2 hours'));
+
+        if ($trip && $bookingType === 'travel') {
+            if (($_POST['agree_total'] ?? '') !== '1') {
+                setFlash('error', 'Agree to the total before requesting this ride.');
+                header('Location: book.php?trip_id=' . $tripId . '&type=travel');
+                exit;
+            }
+            $pickupLoc = trim((string) $trip['origin_address'] . (trim((string) ($trip['origin_city'] ?? '')) !== '' ? ', ' . $trip['origin_city'] : ''));
+            $dropoffLoc = trim((string) $trip['destination_address'] . (trim((string) ($trip['destination_city'] ?? '')) !== '' ? ', ' . $trip['destination_city'] : ''));
+            $notes = '';
+        }
 
         if ($bookingType === 'travel') {
             if ($trip && $seats > $trip['available_seats']) {
@@ -156,6 +221,51 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             db()->commit();
 
+            if ($trip && $bookingType === 'travel') {
+                createNotification(
+                    'rider',
+                    $riderTargetId,
+                    'posted_route_booked',
+                    'Your posted route was accepted',
+                    "This post came from you. A passenger accepted your route from {$pickupLoc} to {$dropoffLoc}.",
+                    'dashboard.php?type=rider&tab=bookings',
+                    'booking',
+                    $bookingId
+                );
+            }
+
+            if ($bookingType === 'delivery') {
+                $sender = currentAccount();
+                $senderName = is_array($sender) ? (string) ($sender['full_name'] ?? 'A customer') : 'A customer';
+                $riderLabel = 'your rider';
+                $nameStmt = db()->prepare('SELECT full_name FROM riders WHERE id = ?');
+                $nameStmt->execute([$riderTargetId]);
+                $foundName = $nameStmt->fetchColumn();
+                if (is_string($foundName) && $foundName !== '') {
+                    $riderLabel = $foundName;
+                }
+                createNotification(
+                    'rider',
+                    $riderTargetId,
+                    'delivery_booking',
+                    'New parcel delivery',
+                    "{$senderName} booked a parcel from {$pickupLoc} to {$dropoffLoc}.",
+                    'messages.php?booking_id=' . $bookingId,
+                    'booking',
+                    $bookingId
+                );
+                createNotification(
+                    'customer',
+                    $customerId,
+                    'delivery_booking',
+                    'Parcel delivery booked',
+                    "Your parcel from {$pickupLoc} to {$dropoffLoc} was sent to {$riderLabel}.",
+                    'messages.php?booking_id=' . $bookingId,
+                    'booking',
+                    $bookingId
+                );
+            }
+
             setFlash('success', 'Booking requested successfully! You can coordinate directly with your rider in the chat below.');
             header('Location: messages.php?booking_id=' . $bookingId);
             exit;
@@ -184,7 +294,7 @@ if ($tripId > 0) {
     $tStmt = db()->prepare(
         "SELECT t.*, r.full_name as rider_name, r.phone as rider_phone, r.whatsapp as rider_whatsapp,
                 r.rating_avg, r.rating_count, r.trips_completed, r.vehicle_type, r.vehicle_model,
-                r.plate_number, r.status as rider_status
+                r.plate_number, r.status as rider_status, r.verification_status, r.account_status, r.deleted_at
          FROM trips t
          JOIN riders r ON t.rider_id = r.id
          WHERE t.id = ?"
@@ -204,6 +314,13 @@ if ($riderId > 0 && !$trip) {
 
 $currentAcc = currentAccount();
 $flash = getFlash();
+$listedRider = $trip ?: $rider;
+$riderAvailable = !is_array($listedRider)
+    || (
+        ($listedRider['verification_status'] ?? '') === 'approved'
+        && ($listedRider['account_status'] ?? 'active') === 'active'
+        && empty($listedRider['deleted_at'])
+    );
 ?>
 <!doctype html>
 <html lang="en">
@@ -252,7 +369,9 @@ $flash = getFlash();
                     Confirm Your <?= $type === 'travel' ? 'Travel Reservation' : 'Delivery Request' ?>
                 </h1>
                 <p style="color: var(--muted); font-size: 14px; margin-bottom: 0;">
-                    Peer-to-peer direct booking with verified community rider. Direct payment and coordination.
+                    <?= ($trip && $type === 'travel')
+                        ? 'This route is fixed. Choose how many seats you need, then agree to the total.'
+                        : 'Peer-to-peer direct booking with verified community rider. Direct payment and coordination.' ?>
                 </p>
             </div>
 
@@ -263,7 +382,7 @@ $flash = getFlash();
                         <div style="display: flex; align-items: center; gap: 12px;">
                             <div class="rider-avatar"><?= strtoupper(substr($trip['rider_name'], 0, 1)) ?></div>
                             <div>
-                                <strong style="font-size: 16px; color: var(--ink);"><?= e($trip['rider_name']) ?></strong>
+                                <strong style="font-size: 16px; color: var(--ink);"><?= e($trip['rider_name']) ?> <?= renderVerifiedTag($trip) ?></strong>
                                 <div style="font-size: 12px; color: var(--muted);">
                                     <?= renderRatingStars((float) $trip['rating_avg'], (int) $trip['rating_count']) ?>
                                     · <?= renderVehicleIcon($trip['vehicle_type']) ?> <?= e($trip['vehicle_model'] ?: ucfirst($trip['vehicle_type'])) ?>
@@ -271,7 +390,6 @@ $flash = getFlash();
                                 </div>
                             </div>
                         </div>
-                        <span class="status-badge badge-success">Verified Driver</span>
                     </div>
 
                     <div class="route-timeline" style="margin: 10px 0;">
@@ -296,7 +414,7 @@ $flash = getFlash();
                 <div style="background: var(--surface-alt); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 18px; margin-bottom: 24px; display: flex; align-items: center; gap: 14px;">
                     <div class="rider-avatar"><?= strtoupper(substr($rider['full_name'], 0, 1)) ?></div>
                     <div>
-                        <strong style="font-size: 16px;"><?= e($rider['full_name']) ?></strong>
+                        <strong style="font-size: 16px;"><?= e($rider['full_name']) ?> <?= renderVerifiedTag($rider) ?></strong>
                         <div style="font-size: 12px; color: var(--muted);">
                             <?= renderRatingStars((float) $rider['rating_avg'], (int) $rider['rating_count']) ?>
                             · <?= renderVehicleIcon($rider['vehicle_type'] ?? 'car') ?>
@@ -313,6 +431,9 @@ $flash = getFlash();
                 </div>
             <?php endif; ?>
 
+            <?php if (!$riderAvailable): ?>
+                <div class="notice notice-error">This rider is not verified yet, so bookings are closed.</div>
+            <?php else: ?>
             <!-- Booking Form -->
             <form method="post" action="book.php">
                 <input type="hidden" name="csrf_token" value="<?= e(csrfToken()) ?>">
@@ -321,6 +442,21 @@ $flash = getFlash();
                 <input type="hidden" name="rider_id" value="<?= (int) ($trip['rider_id'] ?? $riderId) ?>">
                 <input type="hidden" name="booking_type" value="<?= e($type) ?>">
 
+                <?php if ($trip && $type === 'travel'): ?>
+                    <input type="hidden" name="pickup_location" value="<?= e(trim((string) $trip['origin_address'] . (trim((string) ($trip['origin_city'] ?? '')) !== '' ? ', ' . $trip['origin_city'] : ''))) ?>">
+                    <input type="hidden" name="dropoff_location" value="<?= e(trim((string) $trip['destination_address'] . (trim((string) ($trip['destination_city'] ?? '')) !== '' ? ', ' . $trip['destination_city'] : ''))) ?>">
+                    <div class="form-group">
+                        <label class="form-label" for="seats">Seats to book</label>
+                        <select class="form-control" id="seats" name="seats_booked" onchange="updateTotalFare()">
+                            <?php
+                            $maxSeats = max(1, (int) $trip['available_seats']);
+                            for ($s = 1; $s <= min($maxSeats, 6); $s++):
+                            ?>
+                                <option value="<?= $s ?>"><?= $s ?> seat<?= $s > 1 ? 's' : '' ?></option>
+                            <?php endfor; ?>
+                        </select>
+                    </div>
+                <?php else: ?>
                 <?php if ($type === 'travel'): ?>
                     <div class="form-group">
                         <label class="form-label" for="seats">Seats to Book</label>
@@ -343,11 +479,11 @@ $flash = getFlash();
                 <div class="form-grid-2">
                     <div class="form-group">
                         <label class="form-label" for="pickup">Pickup Landmark / Address</label>
-                        <input class="form-control" id="pickup" name="pickup_location" value="<?= e($trip['origin_address'] ?? '') ?>" placeholder="Specific street or landmark" required>
+                        <input class="form-control" id="pickup" name="pickup_location" value="<?= e($trip['origin_address'] ?? '') ?>" placeholder="e.g. Sabon Gari Market, Zaria" required>
                     </div>
                     <div class="form-group">
                         <label class="form-label" for="dropoff">Drop-off Destination</label>
-                        <input class="form-control" id="dropoff" name="dropoff_location" value="<?= e($trip['destination_address'] ?? '') ?>" placeholder="Specific drop-off landmark" required>
+                        <input class="form-control" id="dropoff" name="dropoff_location" value="<?= e($trip['destination_address'] ?? '') ?>" placeholder="e.g. ABU Main Campus, Samaru" required>
                     </div>
                 </div>
 
@@ -355,22 +491,31 @@ $flash = getFlash();
                     <label class="form-label" for="notes">Notes for Driver (Optional)</label>
                     <textarea class="form-control" id="notes" name="customer_notes" placeholder="e.g. I have 1 small backpack with me; will wait by the main gate"></textarea>
                 </div>
+                <?php endif; ?>
 
                 <!-- Fare Calculation Box -->
-                <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: var(--radius-md); padding: 16px 20px; display: flex; align-items: center; justify-content: space-between; margin: 20px 0;">
+                <div class="fare-summary">
                     <div>
-                        <strong style="color: #166534; font-size: 15px;">Total Estimated Fare</strong>
-                        <div style="color: #15803d; font-size: 12px;">Pay directly to rider upon departure/arrival</div>
+                        <strong><?= ($trip && $type === 'travel') ? 'Total' : 'Total Estimated Fare' ?></strong>
+                        <p><?= ($trip && $type === 'travel') ? 'Seat price times the seats you choose' : 'Pay directly to rider upon departure/arrival' ?></p>
                     </div>
-                    <div id="total-fare-display" style="font-size: 24px; font-weight: 800; color: #166534;">
+                    <div id="total-fare-display" class="fare-summary-total">
                         <?= $type === 'travel' ? formatMoney($trip['price_per_seat'] ?? 2500) : formatMoney($trip['delivery_price'] ?? 2000) ?>
                     </div>
                 </div>
 
+                <?php if ($trip && $type === 'travel'): ?>
+                    <label class="form-group" style="flex-direction: row; align-items: flex-start; gap: 10px;">
+                        <input id="agree-total" name="agree_total" type="checkbox" value="1" required style="margin-top: 3px;">
+                        <span>I agree to the total of <strong id="agree-total-amount"><?= e(formatMoney($trip['price_per_seat'])) ?></strong> for this ride.</span>
+                    </label>
+                <?php endif; ?>
+
                 <button class="button button-primary button-full button-lg" type="submit" <?= (!$currentAcc || $currentAcc['account_type'] !== 'customer') ? 'disabled' : '' ?>>
-                    Confirm & Send Booking Request →
+                    <?= ($trip && $type === 'travel') ? 'Agree and request this ride →' : 'Confirm & Send Booking Request →' ?>
                 </button>
             </form>
+            <?php endif; ?>
         </div>
     </main>
 
@@ -387,7 +532,12 @@ $flash = getFlash();
     function updateTotalFare() {
         const seats = parseInt(document.getElementById('seats').value, 10) || 1;
         const total = unitPrice * seats;
-        document.getElementById('total-fare-display').innerText = '₦' + total.toLocaleString();
+        const label = '₦' + total.toLocaleString();
+        document.getElementById('total-fare-display').innerText = label;
+        const agree = document.getElementById('agree-total-amount');
+        if (agree) {
+            agree.innerText = label;
+        }
     }
     </script>
     <?php endif; ?>

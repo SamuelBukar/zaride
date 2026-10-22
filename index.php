@@ -3,110 +3,21 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/config.php';
 
-// Registration form handler
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $postedToken = $_POST['csrf_token'] ?? '';
-    if (!verifyCsrfToken($postedToken)) {
-        setFlash('error', 'Your session could not be verified. Please try registering again.');
-        header('Location: index.php#register');
-        exit;
-    }
-
-    $accountType = trim((string) ($_POST['account_type'] ?? ''));
-    $fullName = trim((string) ($_POST['full_name'] ?? ''));
-    $email = strtolower(trim((string) ($_POST['email'] ?? '')));
-    $phone = trim((string) ($_POST['phone'] ?? ''));
-    $city = trim((string) ($_POST['city'] ?? 'Lagos'));
-    $password = (string) ($_POST['password'] ?? '');
-    $servicesOffered = trim((string) ($_POST['services_offered'] ?? 'both'));
-    $vehicleType = trim((string) ($_POST['vehicle_type'] ?? 'car'));
-
-    $errors = [];
-    if (!in_array($accountType, ['customer', 'rider'], true)) {
-        $errors[] = 'Choose a valid account type.';
-    }
-    if (preg_match('/\A.{1,120}\z/us', $fullName) !== 1) {
-        $errors[] = 'Enter your name (up to 120 characters).';
-    }
-    if (!filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($email) > 254) {
-        $errors[] = 'Enter a valid email address.';
-    }
-    if (!preg_match('/^[+0-9(). -]{7,25}$/', $phone)) {
-        $errors[] = 'Enter a valid phone number (7 to 25 characters).';
-    }
-    if (strlen($password) < 8) {
-        $errors[] = 'Your password must contain at least 8 characters.';
-    }
-    if ($accountType === 'rider' && preg_match('/\A.{1,100}\z/us', $vehicleType) !== 1) {
-        $errors[] = 'Enter a vehicle type (up to 100 characters).';
-    }
-
-    if ($errors !== []) {
-        setFlash('error', implode(' ', $errors));
-        header('Location: index.php#register');
-        exit;
-    }
-
-    try {
-        $passwordHash = password_hash($password, PASSWORD_DEFAULT);
-        if ($accountType === 'customer') {
-            $statement = db()->prepare(
-                'INSERT INTO customers (full_name, email, phone, city, password_hash) VALUES (?, ?, ?, ?, ?)'
-            );
-            $statement->execute([$fullName, $email, $phone, $city, $passwordHash]);
-            $accountId = (int) db()->lastInsertId();
-        } else {
-            $statement = db()->prepare(
-                'INSERT INTO riders (full_name, email, phone, city, services_offered, vehicle_type, password_hash, status)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, "online")'
-            );
-            $statement->execute([$fullName, $email, $phone, $city, $servicesOffered, $vehicleType, $passwordHash]);
-            $accountId = (int) db()->lastInsertId();
-        }
-
-        session_regenerate_id(true);
-        $_SESSION['account_type'] = $accountType;
-        $_SESSION['account_id'] = $accountId;
-        setFlash('success', 'Welcome to ZaRide! Your account is active. Manage your profile below.');
-        header('Location: ' . dashboardUrl($accountType));
-        exit;
-    } catch (PDOException $exception) {
-        if ($exception->getCode() === '23000') {
-            setFlash('error', 'That email address or phone number is already registered for this account type.');
-        } else {
-            error_log('ZaRide registration failed: ' . $exception->getMessage());
-            setFlash('error', 'Registration could not be completed. Check database connection and try again.');
-        }
-    }
-
-    header('Location: index.php#register');
-    exit;
-}
-
 // Fetch live active trips for homepage feature
 $featuredTrips = [];
 try {
     $tripStmt = db()->query(
-        "SELECT t.*, r.full_name as rider_name, r.rating_avg, r.rating_count, r.vehicle_type, r.vehicle_model, r.status as rider_status
+        "SELECT t.*, r.full_name as rider_name, r.rating_avg, r.rating_count, r.vehicle_type, r.vehicle_model, r.status as rider_status, r.verification_status
          FROM trips t
          JOIN riders r ON t.rider_id = r.id
          WHERE t.status = 'active' AND t.departure_time >= DATE_SUB(NOW(), INTERVAL 1 HOUR)
+           AND r.account_status = 'active' AND r.deleted_at IS NULL
+           AND r.verification_status = 'approved'
          ORDER BY t.departure_time ASC LIMIT 6"
     );
     $featuredTrips = $tripStmt->fetchAll();
 } catch (PDOException $e) {
     error_log('Featured trips query error: ' . $e->getMessage());
-}
-
-// Fetch featured online riders
-$featuredRiders = [];
-try {
-    $riderStmt = db()->query(
-        "SELECT * FROM riders WHERE status = 'online' ORDER BY rating_avg DESC, trips_completed DESC LIMIT 4"
-    );
-    $featuredRiders = $riderStmt->fetchAll();
-} catch (PDOException $e) {
-    error_log('Featured riders query error: ' . $e->getMessage());
 }
 
 $currentAcc = currentAccount();
@@ -130,6 +41,7 @@ $flash = getFlash();
             </div>
         </a>
         <nav class="site-nav">
+            <a class="nav-link" href="nearby.php">📍 Nearby</a>
             <a class="nav-link" href="travels.php">🚗 Find Travels</a>
             <a class="nav-link" href="deliveries.php">📦 Deliveries</a>
             <a class="nav-link" href="zaride.php">👥 Riders</a>
@@ -141,7 +53,7 @@ $flash = getFlash();
                 </a>
             <?php else: ?>
                 <a class="nav-link" href="login.php">Sign In</a>
-                <a class="button button-sm button-primary" href="#register">Join ZaRide</a>
+                <a class="button button-sm button-primary" href="register.php">Join ZaRide</a>
             <?php endif; ?>
         </nav>
     </header>
@@ -153,22 +65,28 @@ $flash = getFlash();
             <div class="hero-glow"></div>
             <div class="hero-content">
                 <span class="hero-eyebrow">🚀 The Direct Peer-to-Peer Network</span>
-                <h1>Travel Together. Send Parcels. <br><span class="gradient-text">Zero Middleman Markup.</span></h1>
+                <h1>Travel Together. Send Parcels.</h1>
                 <p class="hero-desc">
                     Connect directly with local drivers and dispatchers. Share rides for affordable commuting, or send packages with trusted peers heading your way.
                 </p>
+                <div class="hero-actions">
+                    <a class="button button-emerald button-lg" href="nearby.php">📍 Nearby ride now (short trips)</a>
+                </div>
 
                 <!-- Interactive Search Console -->
                 <div class="search-console">
                     <div class="console-tabs">
                         <button type="button" class="console-tab active" id="btn-tab-travel" onclick="switchConsoleMode('travel')">
-                            🚗 Passenger Travel
+                            <span class="console-tab-icon" aria-hidden="true">🚗</span>
+                            <span class="console-tab-label">Passenger Travel</span>
                         </button>
                         <button type="button" class="console-tab" id="btn-tab-delivery" onclick="switchConsoleMode('delivery')">
-                            📦 Package Delivery
+                            <span class="console-tab-icon" aria-hidden="true">📦</span>
+                            <span class="console-tab-label">Package Delivery</span>
                         </button>
                         <button type="button" class="console-tab" id="btn-tab-riders" onclick="switchConsoleMode('riders')">
-                            🛵 Online Riders
+                            <span class="console-tab-icon" aria-hidden="true">🛵</span>
+                            <span class="console-tab-label">Online Riders</span>
                         </button>
                     </div>
 
@@ -176,11 +94,11 @@ $flash = getFlash();
                     <form method="get" action="travels.php" class="console-form" id="console-form-travel">
                         <div class="console-input-wrap">
                             <label class="console-label">Departure From</label>
-                            <input class="console-field" name="origin" placeholder="City or landmark (e.g. Ikeja, Lagos)" required>
+                            <input class="console-field" name="origin" placeholder="City or landmark (e.g. Sabon Gari, Zaria)" required>
                         </div>
                         <div class="console-input-wrap">
                             <label class="console-label">Destination To</label>
-                            <input class="console-field" name="destination" placeholder="Destination (e.g. Victoria Island, Ibadan)" required>
+                            <input class="console-field" name="destination" placeholder="Destination (e.g. ABU Samaru, Zaria)" required>
                         </div>
                         <div class="console-input-wrap">
                             <label class="console-label">Date</label>
@@ -195,11 +113,11 @@ $flash = getFlash();
                     <form method="get" action="deliveries.php" class="console-form" id="console-form-delivery" style="display: none;">
                         <div class="console-input-wrap">
                             <label class="console-label">Pickup Location</label>
-                            <input class="console-field" name="origin" placeholder="Pickup spot (e.g. Alausa, Ikeja)" required>
+                            <input class="console-field" name="origin" placeholder="Pickup spot (e.g. Tudun Wada, Zaria)" required>
                         </div>
                         <div class="console-input-wrap">
                             <label class="console-label">Drop-off Destination</label>
-                            <input class="console-field" name="destination" placeholder="Drop-off point (e.g. Lekki Phase 1)" required>
+                            <input class="console-field" name="destination" placeholder="Drop-off point (e.g. Kwangila, Zaria)" required>
                         </div>
                         <div class="console-input-wrap">
                             <label class="console-label">Vehicle Type</label>
@@ -219,7 +137,7 @@ $flash = getFlash();
                     <form method="get" action="zaride.php" class="console-form rider-mode" id="console-form-riders" style="display: none;">
                         <div class="console-input-wrap">
                             <label class="console-label">City / Region</label>
-                            <input class="console-field" name="city" placeholder="City (e.g. Lagos, Abuja, Ibadan)">
+                            <input class="console-field" name="city" placeholder="City (e.g. Zaria, Kaduna)">
                         </div>
                         <div class="console-input-wrap">
                             <label class="console-label">Service Type</label>
@@ -244,7 +162,7 @@ $flash = getFlash();
                     <div class="console-badge-row">
                         <span class="console-stat-pill">✨ <strong>100% Direct P2P</strong> — No platform surcharge</span>
                         <span class="console-stat-pill">🛡️ <strong>Verified Profiles</strong> — License & vehicle plate checks</span>
-                        <span class="console-stat-pill">💬 <strong>Instant Chat</strong> — Coordinate on WhatsApp & in-app</span>
+                        <span class="console-stat-pill">💬 <strong>Instant Chat</strong> — Coordinate in the ZaRide chat</span>
                     </div>
                 </div>
             </div>
@@ -289,7 +207,7 @@ $flash = getFlash();
                                                 <?php endif; ?>
                                             </div>
                                             <div>
-                                                <div class="rider-meta-name"><?= e($trip['rider_name']) ?></div>
+                                                <div class="rider-meta-name"><?= e($trip['rider_name']) ?> <?= renderVerifiedTag($trip) ?></div>
                                                 <div class="rider-submeta">
                                                     <?= renderRatingStars((float) $trip['rating_avg'], (int) $trip['rating_count']) ?>
                                                 </div>
@@ -346,76 +264,6 @@ $flash = getFlash();
             </div>
         </section>
 
-        <!-- Section: Dual Value Proposition (Travels + Deliveries) -->
-        <section class="section section-alt">
-            <div class="container">
-                <div class="section-header">
-                    <span class="section-eyebrow">Two Core Pillars</span>
-                    <h2 class="section-title">Built for Travels & Deliveries Alike</h2>
-                    <p class="section-subtitle">Whether you have people to transport or parcels to dispatch, ZaRide makes peer mobility seamless.</p>
-                </div>
-
-                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 28px;">
-                    <!-- Card 1: Passenger Travel -->
-                    <div style="background: white; border: 1px solid var(--line); border-radius: var(--radius-xl); padding: 34px 28px; box-shadow: var(--shadow-sm);">
-                        <div style="width: 54px; height: 54px; border-radius: var(--radius-md); background: #e0f2fe; color: #0284c7; display: grid; place-items: center; font-size: 26px; margin-bottom: 20px;">
-                            🚗
-                        </div>
-                        <h3 style="font-size: 22px; font-weight: 800; margin-bottom: 12px; color: var(--ink);">
-                            Passenger Carpooling & Travel
-                        </h3>
-                        <p style="color: var(--muted); font-size: 15px; line-height: 1.6; margin-bottom: 20px;">
-                            Skip crowded bus parks and unpredictable taxi prices. Match with fellow commuters and intercity drivers heading in your direction.
-                        </p>
-                        <ul style="list-style: none; padding: 0; margin: 0 0 24px; display: flex; flex-direction: column; gap: 10px; font-size: 14px;">
-                            <li>✓ <strong>Reserve Guaranteed Seats</strong> in air-conditioned vehicles</li>
-                            <li>✓ <strong>Predictable Departure Times</strong> and convenient pickup points</li>
-                            <li>✓ <strong>Direct Communication</strong> via WhatsApp & in-app chat</li>
-                        </ul>
-                        <a class="button button-outline button-full" href="travels.php">Find a Travel Ride →</a>
-                    </div>
-
-                    <!-- Card 2: Parcel Deliveries -->
-                    <div style="background: white; border: 1px solid var(--line); border-radius: var(--radius-xl); padding: 34px 28px; box-shadow: var(--shadow-sm);">
-                        <div style="width: 54px; height: 54px; border-radius: var(--radius-md); background: #dcfce7; color: #16a34a; display: grid; place-items: center; font-size: 26px; margin-bottom: 20px;">
-                            📦
-                        </div>
-                        <h3 style="font-size: 22px; font-weight: 800; margin-bottom: 12px; color: var(--ink);">
-                            Peer Parcel & Courier Delivery
-                        </h3>
-                        <p style="color: var(--muted); font-size: 15px; line-height: 1.6; margin-bottom: 20px;">
-                            Need to dispatch documents, gifts, or merchandise? Harness peer drivers and motorcycles traveling along that exact route.
-                        </p>
-                        <ul style="list-style: none; padding: 0; margin: 0 0 24px; display: flex; flex-direction: column; gap: 10px; font-size: 14px;">
-                            <li>✓ <strong>Same-day Local Motorcycle Dispatch</strong> for urgent parcels</li>
-                            <li>✓ <strong>Intercity Trunk Cargo</strong> in cars, SUVs, and vans</li>
-                            <li>✓ <strong>Post Your Custom Budget</strong> and let nearby riders accept</li>
-                        </ul>
-                        <a class="button button-emerald button-full" href="deliveries.php">Send a Package Now →</a>
-                    </div>
-
-                    <!-- Card 3: For Drivers & Riders -->
-                    <div style="background: white; border: 1px solid var(--line); border-radius: var(--radius-xl); padding: 34px 28px; box-shadow: var(--shadow-sm);">
-                        <div style="width: 54px; height: 54px; border-radius: var(--radius-md); background: #fef3c7; color: #d97706; display: grid; place-items: center; font-size: 26px; margin-bottom: 20px;">
-                            💰
-                        </div>
-                        <h3 style="font-size: 22px; font-weight: 800; margin-bottom: 12px; color: var(--ink);">
-                            For Drivers: Monetize Empty Space
-                        </h3>
-                        <p style="color: var(--muted); font-size: 15px; line-height: 1.6; margin-bottom: 20px;">
-                            Already traveling from Lagos to Ibadan or commuting from the Mainland to Island? Turn empty seats and trunk space into income.
-                        </p>
-                        <ul style="list-style: none; padding: 0; margin: 0 0 24px; display: flex; flex-direction: column; gap: 10px; font-size: 14px;">
-                            <li>✓ <strong>Cover 100% of Your Fuel</strong> and vehicle operating costs</li>
-                            <li>✓ <strong>Set Your Own Schedule</strong> and choose which requests to accept</li>
-                            <li>✓ <strong>Keep Every Naira</strong> — direct peer-to-peer payout</li>
-                        </ul>
-                        <a class="button button-dark button-full" href="#register">Register as a Driver / Rider →</a>
-                    </div>
-                </div>
-            </div>
-        </section>
-
         <!-- Section: How It Works -->
         <section class="section">
             <div class="container">
@@ -425,7 +273,7 @@ $flash = getFlash();
                     <p class="section-subtitle">Simple, peer-driven, and designed for speed and trust.</p>
                 </div>
 
-                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 24px; text-align: center;">
+                <div class="steps-grid">
                     <div style="padding: 24px;">
                         <div style="width: 56px; height: 56px; margin: 0 auto 18px; border-radius: var(--radius-full); background: var(--primary-light); color: var(--primary); font-size: 22px; font-weight: 800; display: grid; place-items: center;">1</div>
                         <h4 style="font-size: 18px; font-weight: 800; margin-bottom: 8px;">Find or Post a Route</h4>
@@ -435,7 +283,7 @@ $flash = getFlash();
                     <div style="padding: 24px;">
                         <div style="width: 56px; height: 56px; margin: 0 auto 18px; border-radius: var(--radius-full); background: var(--primary-light); color: var(--primary); font-size: 22px; font-weight: 800; display: grid; place-items: center;">2</div>
                         <h4 style="font-size: 18px; font-weight: 800; margin-bottom: 8px;">Connect Directly</h4>
-                        <p style="color: var(--muted); font-size: 14px;">Coordinate pickup landmarks, timing, and package details via in-app chat, direct telephone, or WhatsApp.</p>
+                        <p style="color: var(--muted); font-size: 14px;">Coordinate pickup landmarks, timing, and package details in the in-app chat (or by phone call).</p>
                     </div>
 
                     <div style="padding: 24px;">
@@ -447,116 +295,6 @@ $flash = getFlash();
             </div>
         </section>
 
-        <!-- Section: Registration (Dual Role) -->
-        <section class="section section-alt" id="register">
-            <div class="container" style="max-width: 960px;">
-                <div class="section-header">
-                    <span class="section-eyebrow">Get Started in Seconds</span>
-                    <h2 class="section-title">Create Your ZaRide Account</h2>
-                    <p class="section-subtitle">Join thousands of travelers, dispatchers, and vehicle owners across Nigeria.</p>
-                </div>
-
-                <div class="trip-grid" style="grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));">
-                    <!-- Customer Form -->
-                    <div style="background: white; border: 1px solid var(--line); border-radius: var(--radius-xl); padding: 32px 28px; box-shadow: var(--shadow-sm);">
-                        <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 18px;">
-                            <span style="width: 44px; height: 44px; border-radius: var(--radius-md); background: #dbeafe; color: #1d4ed8; display: grid; place-items: center; font-size: 22px;">👤</span>
-                            <div>
-                                <span class="hero-eyebrow" style="background: #eff6ff; color: #1d4ed8; margin: 0; padding: 2px 8px;">For Passengers & Senders</span>
-                                <h3 style="font-size: 20px; font-weight: 800; margin: 0;">Customer Account</h3>
-                            </div>
-                        </div>
-                        <p style="font-size: 13px; color: var(--muted); margin-bottom: 20px;">Book passenger travels, request express deliveries, and track journeys.</p>
-
-                        <form method="post" action="index.php#register">
-                            <input type="hidden" name="csrf_token" value="<?= e(csrfToken()) ?>">
-                            <input type="hidden" name="account_type" value="customer">
-
-                            <div class="form-group">
-                                <label class="form-label">Full Name</label>
-                                <input class="form-control" name="full_name" placeholder="e.g. Amaka Johnson" required maxlength="120">
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">Email Address</label>
-                                <input class="form-control" name="email" type="email" placeholder="name@example.com" required maxlength="254">
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">Phone Number</label>
-                                <input class="form-control" name="phone" type="tel" placeholder="e.g. 08012345678" required maxlength="25">
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">Primary City</label>
-                                <input class="form-control" name="city" placeholder="e.g. Lagos, Abuja, Ibadan" value="Lagos" required maxlength="100">
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">Password</label>
-                                <input class="form-control" name="password" type="password" minlength="8" placeholder="At least 8 characters" required>
-                            </div>
-
-                            <button class="button button-primary button-full button-lg" type="submit" style="margin-top: 10px;">
-                                Register as Customer →
-                            </button>
-                        </form>
-                    </div>
-
-                    <!-- Rider / Driver Form -->
-                    <div style="background: white; border: 1px solid var(--line); border-radius: var(--radius-xl); padding: 32px 28px; box-shadow: var(--shadow-sm);">
-                        <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 18px;">
-                            <span style="width: 44px; height: 44px; border-radius: var(--radius-md); background: #dcfce7; color: #15803d; display: grid; place-items: center; font-size: 22px;">🛵</span>
-                            <div>
-                                <span class="hero-eyebrow" style="background: #f0fdf4; color: #15803d; margin: 0; padding: 2px 8px;">For Drivers & Dispatchers</span>
-                                <h3 style="font-size: 20px; font-weight: 800; margin: 0;">Rider Account</h3>
-                            </div>
-                        </div>
-                        <p style="font-size: 13px; color: var(--muted); margin-bottom: 20px;">Offer seats on your trips, deliver parcels, and earn on your schedule.</p>
-
-                        <form method="post" action="index.php#register">
-                            <input type="hidden" name="csrf_token" value="<?= e(csrfToken()) ?>">
-                            <input type="hidden" name="account_type" value="rider">
-
-                            <div class="form-group">
-                                <label class="form-label">Full Name</label>
-                                <input class="form-control" name="full_name" placeholder="e.g. David Adeyemi" required maxlength="120">
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">Email Address</label>
-                                <input class="form-control" name="email" type="email" placeholder="rider@example.com" required maxlength="254">
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">Phone Number (Calls & WhatsApp)</label>
-                                <input class="form-control" name="phone" type="tel" placeholder="e.g. 08023456789" required maxlength="25">
-                            </div>
-                            <div class="form-grid-2">
-                                <div class="form-group">
-                                    <label class="form-label">Services Offered</label>
-                                    <select class="form-control" name="services_offered">
-                                        <option value="both" selected>Travels & Deliveries</option>
-                                        <option value="travel">Passenger Travel Only</option>
-                                        <option value="delivery">Parcel Delivery Only</option>
-                                    </select>
-                                </div>
-                                <div class="form-group">
-                                    <label class="form-label">Vehicle Type</label>
-                                    <input class="form-control" name="vehicle_type" type="text" maxlength="100" placeholder="e.g. Car, Motorcycle, Scooter" value="car" required>
-                                </div>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">Password</label>
-                                <input class="form-control" name="password" type="password" minlength="8" placeholder="At least 8 characters" required>
-                            </div>
-
-                            <button class="button button-emerald button-full button-lg" type="submit" style="margin-top: 10px;">
-                                Register as Rider / Driver →
-                            </button>
-                        </form>
-                    </div>
-                </div>
-
-                <p style="text-align: center; margin-top: 24px; color: var(--muted); font-size: 13px;">
-                    Already have an account? <a href="login.php" style="color: var(--primary); font-weight: 700;">Sign in to your account</a>
-                </p>
-            </div>
-        </section>
     </main>
 
     <!-- Footer -->
@@ -574,33 +312,6 @@ $flash = getFlash();
                     Connecting local journeys, passenger carpools, and peer parcel deliveries across Nigeria. Safe, direct, transparent.
                 </p>
             </div>
-            <div class="footer-col">
-                <h4>Mobility</h4>
-                <ul class="footer-links">
-                    <li><a href="travels.php">Find Passenger Travels</a></li>
-                    <li><a href="deliveries.php">Send Parcel / Delivery</a></li>
-                    <li><a href="zaride.php">Directory of Riders</a></li>
-                    <li><a href="travels.php#post-request">Post Travel Request</a></li>
-                </ul>
-            </div>
-            <div class="footer-col">
-                <h4>Drivers & Riders</h4>
-                <ul class="footer-links">
-                    <li><a href="index.php#register">Register as Driver</a></li>
-                    <li><a href="dashboard.php?type=rider">Rider Dashboard</a></li>
-                    <li><a href="deliveries.php">Claim Delivery Requests</a></li>
-                    <li><a href="login.php?type=rider">Driver Sign In</a></li>
-                </ul>
-            </div>
-            <div class="footer-col">
-                <h4>Safety & Trust</h4>
-                <ul class="footer-links">
-                    <li><a href="zaride.php">Verified Peer Profiles</a></li>
-                    <li><a href="login.php">Secure Authentication</a></li>
-                    <li><a href="#">Privacy & Terms</a></li>
-                    <li><a href="#">Contact Support</a></li>
-                </ul>
-            </div>
         </div>
         <div class="footer-bottom">
             <span>© <?= date('Y') ?> ZaRide P2P Mobility & Logistics Network. All rights reserved.</span>
@@ -609,6 +320,9 @@ $flash = getFlash();
     </footer>
 
     <script>
+    if (window.location.hash === '#register') {
+        window.location.replace('register.php');
+    }
     function switchConsoleMode(mode) {
         document.getElementById('btn-tab-travel').classList.remove('active');
         document.getElementById('btn-tab-delivery').classList.remove('active');

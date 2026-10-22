@@ -11,7 +11,7 @@ $vehicleFilter = trim($_GET['vehicle'] ?? '');
 
 $sql = "SELECT r.*,
                (SELECT COUNT(t.id) FROM trips t WHERE t.rider_id = r.id AND t.status = 'active') as active_trips_count
-        FROM riders r WHERE 1=1";
+        FROM riders r WHERE " . listedRiderSql('r');
 $params = [];
 
 if ($statusFilter === 'online') {
@@ -79,7 +79,7 @@ $flash = getFlash();
                 </a>
             <?php else: ?>
                 <a class="nav-link" href="login.php">Sign In</a>
-                <a class="button button-sm button-primary" href="index.php#register">Join ZaRide</a>
+                <a class="button button-sm button-primary" href="register.php">Join ZaRide</a>
             <?php endif; ?>
         </nav>
     </header>
@@ -116,7 +116,7 @@ $flash = getFlash();
                         <option value="delivery" <?= $serviceFilter === 'delivery' ? 'selected' : '' ?>>📦 Parcel Delivery</option>
                     </select>
 
-                    <input class="console-field" style="height: 38px; width: 170px;" type="text" name="city" placeholder="City (e.g. Lagos, Abuja)" value="<?= e($cityFilter) ?>">
+                    <input class="console-field" style="height: 38px; width: 170px;" type="text" name="city" placeholder="City (e.g. Zaria, Kaduna)" value="<?= e($cityFilter) ?>">
 
                     <select class="filter-select" name="vehicle">
                         <option value="">Vehicle: All</option>
@@ -138,7 +138,7 @@ $flash = getFlash();
                 <h2 style="font-size: 20px; font-weight: 800; margin: 0;">
                     <?= count($riders) ?> <?= count($riders) === 1 ? 'Rider Available' : 'Riders Available' ?>
                 </h2>
-                <a class="button button-sm button-secondary" href="index.php#register">Become a Rider →</a>
+                <a class="button button-sm button-secondary" href="register.php?type=rider">Become a Rider →</a>
             </div>
 
             <?php if ($databaseError): ?>
@@ -164,7 +164,7 @@ $flash = getFlash();
                                             <?php endif; ?>
                                         </div>
                                         <div>
-                                            <div class="rider-meta-name"><?= e($rider['full_name']) ?></div>
+                                            <div class="rider-meta-name"><?= e($rider['full_name']) ?> <?= renderVerifiedTag($rider) ?></div>
                                             <div class="rider-submeta">
                                                 <?= renderRatingStars((float) $rider['rating_avg'], (int) $rider['rating_count']) ?>
                                             </div>
@@ -190,12 +190,16 @@ $flash = getFlash();
 
                                 <!-- Vehicle & Capacity Box -->
                                 <div style="background: var(--surface-alt); border-radius: var(--radius-md); padding: 12px 14px; font-size: 13px; color: var(--ink); margin-bottom: 16px; border: 1px solid var(--line-subtle);">
+                                    <?php $vehicleUrl = vehiclePhotoUrl($rider['vehicle_photo_path'] ?? null); ?>
+                                    <?php if ($vehicleUrl !== null): ?>
+                                        <img src="<?= e($vehicleUrl) ?>" alt="<?= e($rider['vehicle_model'] ?: 'Vehicle') ?>" class="vehicle-photo vehicle-photo-card">
+                                    <?php endif; ?>
                                     <div style="font-weight: 700; margin-bottom: 4px;">
                                         <?= renderVehicleIcon($rider['vehicle_type'] ?? 'car') ?>
                                         <?= e($rider['vehicle_model'] ?: ucfirst($rider['vehicle_type'] ?? 'car')) ?>
                                         <?= !empty($rider['plate_number']) ? '· Plate: ' . e($rider['plate_number']) : '' ?>
                                     </div>
-                                    <div style="display: flex; gap: 14px; color: var(--muted); font-size: 12px;">
+                                    <div class="spec-row">
                                         <span>💺 <?= (int) ($rider['seats_available'] ?? 4) ?> seats</span>
                                         <span>📦 <?= (int) ($rider['max_cargo_kg'] ?? 20) ?>kg cargo</span>
                                         <span>🏁 <?= (int) ($rider['trips_completed'] ?? 0) ?> trips</span>
@@ -215,14 +219,9 @@ $flash = getFlash();
                                             <a class="button button-sm button-secondary" style="flex: 1;" href="tel:<?= e($rider['phone']) ?>">
                                                 📞 Call
                                             </a>
-                                            <?php if (!empty($rider['whatsapp'])): ?>
-                                                <a class="button button-sm button-whatsapp" style="flex: 1;" href="https://wa.me/<?= e(preg_replace('/\D+/', '', $rider['whatsapp'])) ?>?text=<?= rawurlencode("Hi {$rider['full_name']}, I found your profile on ZaRide.") ?>" target="_blank" rel="noopener noreferrer">
-                                                    WhatsApp
-                                                </a>
-                                            <?php endif; ?>
                                         <?php else: ?>
                                             <a class="button button-sm button-secondary button-full" href="login.php?type=customer">
-                                                🔒 Sign in to call / WhatsApp
+                                                🔒 Sign in to book or call
                                             </a>
                                         <?php endif; ?>
                                     </div>
